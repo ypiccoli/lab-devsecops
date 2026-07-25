@@ -1,0 +1,6 @@
+app/.venv/
+app/__pycache__/
+*.pyc
+.env
+kubectl
+*.zip
