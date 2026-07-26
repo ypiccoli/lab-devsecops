@@ -12,3 +12,17 @@ output "region" {
   description = "Região configurada"
   value       = var.region
 }
+output "vcn_id" {
+  description = "OCID da VCN do lab"
+  value       = oci_core_vcn.lab.id
+}
+
+output "subnet_public_id" {
+  description = "OCID da subnet publica (usado na criacao da VM)"
+  value       = oci_core_subnet.public.id
+}
+
+output "vcn_cidr" {
+  description = "CIDR da VCN"
+  value       = var.vcn_cidr
+}
