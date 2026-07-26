@@ -26,3 +26,13 @@ output "vcn_cidr" {
   description = "CIDR da VCN"
   value       = var.vcn_cidr
 }
+
+output "public_ip" {
+  description = "IP publico da VM do lab"
+  value       = oci_core_instance.lab.public_ip
+}
+
+output "ssh_command" {
+  description = "Comando pronto para conectar na VM"
+  value       = "ssh -i ~/.ssh/lab_devsecops ubuntu@${oci_core_instance.lab.public_ip}"
+}
