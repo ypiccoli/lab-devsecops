@@ -6,10 +6,10 @@
 | Campo | Valor |
 |---|---|
 | Projeto | `lab-devsecops` |
-| Sprint documentada | Sprint 1 - Fundação (Linux, Docker, Git avançado) |
+| Sprints documentadas | Sprint 1 - Fundação (Linux, Docker, Git avançado) · Sprint 2 - IaC (Terraform, Oracle Cloud) |
 | Ambiente de desenvolvimento | WSL Ubuntu sobre Windows |
 | Repositório | público (portfólio) |
-| Status da Sprint 1 | Concluída |
+| Status | Sprint 1 concluída · Sprint 2 em andamento |
 
 ---
 
@@ -83,7 +83,64 @@ Credenciais do banco em `.env` na raiz, fora do versionamento. `.env.example` co
 
 ---
 
-## 4. Decisões arquiteturais (ADRs)
+## 4. Infraestrutura como código (Sprint 2)
+
+A partir da Sprint 2 o provisionamento sai do console web e passa a ser descrito em código. O provedor é a Oracle Cloud Infrastructure (OCI), no Always Free Tier.
+
+### 4.1 Diagrama da infraestrutura
+
+```mermaid
+flowchart TB
+    subgraph tenancy["OCI · tenancy · região sa-saopaulo-1"]
+        subgraph comp["compartment lab-devsecops"]
+            subgraph vcn["VCN 10.0.0.0/16"]
+                subnet["subnet pública 10.0.1.0/24"]
+                sl["security list<br/>ingress: 22, 5000, ICMP 3/4<br/>egress: liberado"]
+                rt["route table<br/>0.0.0.0/0 → IGW"]
+                vm["VM Ampere A1 (ARM)<br/>PENDENTE — sem capacidade"]
+                subnet --- sl
+                subnet --- rt
+                subnet -.-> vm
+            end
+            igw["internet gateway"]
+            rt --> igw
+        end
+    end
+
+    dev["workstation (WSL)"] -->|"SSH 22 / API 5000<br/>origem restrita por CIDR"| subnet
+    igw --> internet["internet"]
+```
+
+### 4.2 Estrutura de arquivos (`terraform/`)
+
+| Arquivo | Responsabilidade |
+|---|---|
+| `provider.tf` | versão do Terraform, provider `oracle/oci` e sua configuração |
+| `variables.tf` | declaração de todas as variáveis de entrada |
+| `main.tf` | data sources de identidade (availability domains, compartment) |
+| `network.tf` | VCN, internet gateway, route table, security list, subnet |
+| `compute.tf` | data source da imagem Ubuntu ARM e a instância |
+| `outputs.tf` | valores exportados (OCIDs, IP público, comando SSH) |
+| `terraform.tfvars` | valores reais do ambiente — **não versionado** |
+| `terraform.tfvars.example` | referência de preenchimento — versionado |
+| `.terraform.lock.hcl` | trava a versão do provider — versionado |
+
+A separação por arquivo é convenção, não exigência: o Terraform concatena todos os `.tf` do diretório antes de avaliar. O ganho é de legibilidade e de revisão de PR.
+
+### 4.3 Ordem de criação e grafo de dependências
+
+Em nenhum ponto do código a ordem de criação é declarada. O Terraform a deduz das referências entre recursos: quando um `subnet` referencia `oci_core_route_table.public.id`, isso é uma aresta no grafo. O resultado é um grafo acíclico dirigido, com criação em paralelo do que é independente e serialização do que não é.
+
+```
+subnet ──> route_table ──> internet_gateway ──> vcn
+   └─────> security_list ────────────────────────┘
+```
+
+Confirmado na execução: a VCN primeiro, depois `security_list` e `internet_gateway` em paralelo, depois a `route_table`, e por último a `subnet`. O grafo pode ser inspecionado com `terraform graph` (saída em formato DOT).
+
+---
+
+## 5. Decisões arquiteturais (ADRs)
 
 ### ADR-001 - Build multi-stage
 **Status:** aceito.
@@ -113,20 +170,51 @@ Credenciais do banco em `.env` na raiz, fora do versionamento. `.env.example` co
 **Status:** aceito.
 **Contexto:** commitar direto na `main` não simula um fluxo de equipe e não exercita revisão nem gate de merge.
 **Decisão:** trabalhar por feature branches, com commit semântico, abrir PR, revisar o próprio diff e fazer merge por squash. A `main` recebe uma regra (ruleset) exigindo PR antes do merge e bloqueando force push. Zero aprovações obrigatórias, para não travar o fluxo de um único autor. O repositório foi tornado público, o que habilita a proteção de branch no plano gratuito do GitHub.
-**Consequências:** histórico linpo por squash, gate de merge ativo, push direto na `main` rejeitado. Convenção de commit adotada daqui em diante: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`.
+**Consequências:** histórico limpo por squash, gate de merge ativo, push direto na `main` rejeitado. Convenção de commit adotada daqui em diante: `feat:`, `fix:`, `docs:`, `chore:`, `refactor:`.
+
+### ADR-006 - Terraform sobre Oracle Cloud Free Tier
+**Status:** aceito.
+**Contexto:** o lab precisa de infraestrutura real para exercitar IaC, mas não pode gerar custo recorrente. AWS e Azure oferecem crédito temporário que expira; a OCI oferece recursos Always Free sem prazo, incluindo a shape ARM Ampere A1 com 4 OCPUs e 24 GB no total do tenancy.
+**Decisão:** usar Terraform com o provider `oracle/oci` sobre a Oracle Cloud Free Tier, região `sa-saopaulo-1`. Recursos isolados num compartment dedicado `lab-devsecops` em vez do compartment raiz.
+**Consequências:** infraestrutura permanente sem custo, com margem de recursos suficiente para rodar a stack Docker do Sprint 1 na nuvem. O compartment dedicado permite policy, quota e limpeza segregadas do resto do tenancy. Custo da escolha: menor disponibilidade de capacidade ARM que os provedores maiores (ver ADR-009) e ecossistema de exemplos menor que o de AWS.
+
+### ADR-007 - Autenticação por API key com credenciais fora do repositório
+**Status:** aceito, com débito registrado.
+**Contexto:** o provider precisa autenticar na API da OCI. Os identificadores da conta (tenancy OCID, user OCID, fingerprint) e a chave privada são material sensível, e o repositório é público.
+**Decisão:** autenticação por par de chaves RSA, com a chave privada em `~/.oci/` (permissão `600`) e nunca dentro do repositório. Os valores do ambiente ficam em `terraform.tfvars`, coberto pelo `.gitignore`, com um `terraform.tfvars.example` versionado servindo de referência de onboarding. O `.gitignore` também bloqueia `*.pem`, `*.key`, `*.tfstate*` e `.terraform/`. O `.terraform.lock.hcl` é versionado deliberadamente, para travar a versão do provider entre máquinas.
+**Consequências:** nenhum segredo no repositório público, e quem clona sabe exatamente o que precisa preencher. Verificação adotada antes de cada push: `git ls-files | grep -E '\.env$|\.tfvars$|\.pem$|\.key$'` precisa retornar vazio. Vale registrar que o `.gitignore` só protege arquivo ainda não rastreado, então a checagem não é redundante.
+
+### ADR-008 - Security list restritiva por origem
+**Status:** aceito.
+**Contexto:** a subnet é pública e a VM terá IP roteável na internet. Porta 22 aberta para `0.0.0.0/0` é a exposição mais varrida por bots em cloud pública, e comprometimento por força bruta em SSH é rotina, não exceção.
+**Decisão:** ingress liberado apenas para CIDR de origem conhecida, parametrizado em `ssh_allowed_cidr` e `api_allowed_cidr`, ambos declarados **sem valor padrão**. A ausência de `default` é intencional: obriga decisão explícita a cada ambiente e impede que alguém aplique a stack sem pensar na origem. Egress liberado, necessário para `apt`, `docker pull` e afins. Incluída regra de ICMP tipo 3 código 4 (Path MTU Discovery), sem a qual conexões travam de forma intermitente e difícil de diagnosticar.
+**Consequências:** superfície de exposição mínima, aplicando o mesmo princípio de menor privilégio já adotado no ADR-002. Custo operacional: IP residencial dinâmico exige reaplicar a stack quando muda. O atrito é deliberado e preferível à alternativa. Os CIDRs de rede (`vcn_cidr`, `subnet_public_cidr`) mantêm `default`, por serem decisão de arquitetura e não dado de ambiente.
+
+### ADR-009 - Provisionamento da VM bloqueado por capacidade (pendência externa)
+**Status:** aceito como pendência, código mantido em versionamento.
+**Contexto:** a shape `VM.Standard.A1.Flex` (Ampere ARM) é o recurso mais disputado do Always Free. As tentativas de `apply` em `sa-saopaulo-1` retornam `500-InternalError, Out of host capacity`, tanto com 2 OCPU / 12 GB quanto com 1 OCPU / 6 GB. O `plan` valida sem erro e a requisição chega à API com resposta da Oracle, o que confirma limitação de plataforma e não defeito de configuração.
+**Decisão:** manter `compute.tf` versionado com o `apply` pendente, e retomar as tentativas periodicamente em janelas de menor demanda. Tentativas manuais e espaçadas, nunca automatizadas em laço: retry agressivo em `LaunchInstance` é tratado como abuso pela Oracle e pode suspender a conta.
+**Consequências:** as tarefas seguintes que dependem apenas de código (modularização, pipeline) seguem sem bloqueio. Fallback avaliado e descartado por ora: `VM.Standard.E2.1.Micro` (AMD) tem capacidade folgada, mas apenas 1 GB de RAM, insuficiente para a stack Flask + MariaDB sem risco de OOM. Se a capacidade ARM não abrir, a shape AMD entra como contorno documentado para validar SSH, cloud-init e Ansible, com a limitação declarada.
+
+Detalhe de implementação que merece registro: o `oci_core_instance` usa `lifecycle { ignore_changes = [source_details[0].source_id] }`. A imagem vem de um data source que resolve sempre a mais recente da Canonical, e sem esse bloco cada nova publicação upstream faria o Terraform propor destruir e recriar a VM, com perda de tudo que estivesse dentro dela.
 
 ---
 
-## 5. Débito técnico registrado
+## 6. Débito técnico registrado
 
 | Item | Situação atual | Plano | Sprint alvo |
 |---|---|---|---|
-| Segredos | `.env` em texto plano, gitignored | Migrar para HashiCorp Vault | Sprint 4 |
+| Segredos da aplicação | `.env` em texto plano, gitignored | Migrar para HashiCorp Vault | Sprint 4 |
 | Ciclo de dev da imagem | Cada mudança de código exige `--build` | Avaliar bind mount `./app:/app` com reloader do Flask para dev | a definir |
+| Estado do Terraform | `terraform.tfstate` local, em texto plano, gitignored | Migrar para backend remoto (OCI Object Storage) com criptografia e locking | a definir |
+| Qualidade de IaC | Nenhuma verificação automatizada | `pre-commit` com `terraform fmt`, `tflint`, `trivy config` e `gitleaks` | a definir |
+| VM Ampere A1 | Código pronto, `apply` bloqueado por capacidade | Retomar tentativas; fallback AMD documentado no ADR-009 | Sprint 2 |
+
+Nota sobre o estado: o `tfstate` guarda em texto plano tudo que passa pelo Terraform, incluindo valores sensíveis de recursos futuros (senhas de banco, chaves geradas). Enquanto for local ele depende exclusivamente da criptografia de disco da estação, e não sobrevive à perda da máquina nem permite trabalho compartilhado. É o mesmo tipo de débito consciente do ADR-004.
 
 ---
 
-## 6. Como subir a stack
+## 7. Como subir a stack local
 
 Na raiz `~/projetos/lab-devsecops`:
 
@@ -149,6 +237,36 @@ Atenção: `docker compose down` sem `-v` preserva o volume `db_data`. Não use 
 
 ---
 
-## 7. Estado ao fim do Sprint 1
+## 8. Como aplicar a infraestrutura
 
-Stack sobe com um comando. Fluxo de PR ativo com proteção de branch. Documentação inicial no ar. Base pronta para o Sprint 2, quando o provisionamento sai do "clico no console" e passa para Terraform na Oracle Cloud Free Tier.
+Pré-requisitos: par de chaves da API cadastrado na OCI e `terraform/terraform.tfvars` preenchido a partir do `.example`.
+
+```bash
+cd terraform
+terraform init
+terraform fmt
+terraform validate
+terraform plan
+terraform apply
+terraform output
+```
+
+Inspecionar o grafo de dependências:
+
+```bash
+terraform graph
+```
+
+Destruir tudo que o Terraform criou:
+
+```bash
+terraform destroy
+```
+
+---
+
+## 9. Estado atual
+
+**Sprint 1 (concluída).** Stack sobe com um comando. Fluxo de PR ativo com proteção de branch. Documentação no ar.
+
+**Sprint 2 (em andamento).** Rede completa provisionada por código na OCI: VCN, subnet pública, internet gateway, route table e security list restritiva, sem nenhum clique no console. Autenticação por API key validada de ponta a ponta. Provisionamento da VM pendente de capacidade ARM no free tier (ADR-009). Próximo passo: modularização do código Terraform.
