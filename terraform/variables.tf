@@ -50,3 +50,26 @@ variable "api_allowed_cidr" {
   description = "Origem permitida para a API Flask (5000/tcp)"
   type        = string
 }
+
+variable "instance_shape" {
+  description = "Shape da VM. A1.Flex e ARM Always Free."
+  type        = string
+  default     = "VM.Standard.A1.Flex"
+}
+
+variable "instance_ocpus" {
+  description = "OCPUs da VM (free tier permite ate 4 no total do tenancy)"
+  type        = number
+  default     = 1
+}
+
+variable "instance_memory_gb" {
+  description = "Memoria em GB (free tier permite ate 24 no total do tenancy)"
+  type        = number
+  default     = 6
+}
+
+variable "ssh_public_key_path" {
+  description = "Caminho da chave SSH publica injetada na VM"
+  type        = string
+}
