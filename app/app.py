@@ -16,10 +16,14 @@ def get_db_config():
     }
 
 
+from datetime import datetime, timezone
+
 @app.route("/")
 def health():
-    return jsonify({"status": "ok"})
-
+    return {
+        "status": "ok",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
 @app.route("/db")
 def db_check():
