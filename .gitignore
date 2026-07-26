@@ -4,3 +4,20 @@ app/__pycache__/
 .env
 kubectl
 *.zip
+
+# Terraform
+*.tfvars
+!*.tfvars.example
+*.tfstate
+*.tfstate.*
+.terraform/
+crash.log
+override.tf
+override.tf.json
+
+# Chaves
+*.pem
+*.key
+
+# Binários locais
+kubectl
